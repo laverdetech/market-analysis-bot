@@ -1,0 +1,9 @@
+market-analysis-bot/
+│
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── config.py
+├── bot.py
+└── logs/
+    └── market_bot.log
