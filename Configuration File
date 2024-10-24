@@ -1,0 +1,15 @@
+import os
+from dotenv import load_dotenv
+
+# Načítanie premenných prostredia
+load_dotenv()
+
+# Konfiguračné konštanty
+TELEGRAM_TOKEN = "7375227916:AAGq223FfK-2HMAIGbLrfEq4WfUivGvSqj8"
+ALPHA_VANTAGE_API_KEY = "M35WFJN1LJ5MZ9DF"
+CHECK_INTERVAL = 3600  # kontrola každú hodinu
+PRICE_CHANGE_THRESHOLD = 0.01  # 1% zmena pre notifikácie
+
+# Logging konfigurácia
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_FILE = 'logs/market_bot.log'
