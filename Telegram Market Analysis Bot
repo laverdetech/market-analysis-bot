@@ -1,0 +1,294 @@
+import os
+import telegram
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+import requests
+import json
+from datetime import datetime
+import pandas as pd
+import logging
+import asyncio
+from telegram import Update, ParseMode
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+
+# Konfiguračné konštanty
+TELEGRAM_TOKEN = "7375227916:AAGq223FfK-2HMAIGbLrfEq4WfUivGvSqj8"
+ALPHA_VANTAGE_API_KEY = "M35WFJN1LJ5MZ9DF"
+CHECK_INTERVAL = 3600  # kontrola každú hodinu
+PRICE_CHANGE_THRESHOLD = 0.01  # 1% zmena pre notifikácie
+
+# Nastavenie loggingu
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    filename='market_bot.log'  # Pridané logovanie do súboru
+)
+logger = logging.getLogger(__name__)
+
+class MarketAnalysisBot:
+    def __init__(self):
+        self.previous_gold_price = None
+        self.previous_silver_price = None
+        self.subscribed_users = set()  # Množina pre sledovanie prihlásených užívateľov
+        
+    async def get_metal_price(self, metal):
+        """Získa aktuálnu cenu kovu (XAU alebo XAG)"""
+        url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={metal}&to_currency=USD&apikey={ALPHA_VANTAGE_API_KEY}"
+        
+        try:
+            response = requests.get(url)
+            data = response.json()
+            if "Realtime Currency Exchange Rate" in data:
+                price = float(data["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
+                return price
+            else:
+                logger.error(f"Neplatná odpoveď API pre {metal}: {data}")
+                return None
+        except Exception as e:
+            logger.error(f"Chyba pri získavaní ceny {metal}: {str(e)}")
+            return None
+
+    async def get_market_news(self):
+        """Získa najnovšie správy z trhu"""
+        url = f'https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GOLD,SILVER&apikey={ALPHA_VANTAGE_API_KEY}'
+        
+        try:
+            response = requests.get(url)
+            data = response.json()
+            return data.get('feed', [])[:5]  # Vracia prvých 5 správ
+        except Exception as e:
+            logger.error(f"Chyba pri získavaní správ: {str(e)}")
+            return []
+
+    async def get_economic_indicators(self):
+        """Získa ekonomické indikátory"""
+        indicators = {}
+        
+        # Získanie inflácie
+        try:
+            inflation_url = f'https://www.alphavantage.co/query?function=INFLATION&apikey={ALPHA_VANTAGE_API_KEY}'
+            response = requests.get(inflation_url)
+            data = response.json()
+            indicators['inflation'] = data['data'][0]['value']
+        except Exception as e:
+            logger.error(f"Chyba pri získavaní inflácie: {str(e)}")
+            
+        # Získanie nezamestnanosti
+        try:
+            unemployment_url = f'https://www.alphavantage.co/query?function=UNEMPLOYMENT&apikey={ALPHA_VANTAGE_API_KEY}'
+            response = requests.get(unemployment_url)
+            data = response.json()
+            indicators['unemployment'] = data['data'][0]['value']
+        except Exception as e:
+            logger.error(f"Chyba pri získavaní nezamestnanosti: {str(e)}")
+            
+        # Získanie NFP
+        try:
+            nfp_url = f'https://www.alphavantage.co/query?function=NONFARM_PAYROLL&apikey={ALPHA_VANTAGE_API_KEY}'
+            response = requests.get(nfp_url)
+            data = response.json()
+            indicators['nfp'] = data['data'][0]['value']
+        except Exception as e:
+            logger.error(f"Chyba pri získavaní NFP: {str(e)}")
+            
+        return indicators
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Spracuje príkaz /start"""
+        user_id = update.message.from_user.id
+        self.subscribed_users.add(user_id)
+        
+        welcome_message = """
+        👋 Vitajte v Market Analysis Bot!
+
+        Dostupné príkazy:
+        /prices - Zobrazí aktuálne ceny zlata a striebra
+        /news - Zobrazí najnovšie správy z trhu
+        /indicators - Zobrazí ekonomické indikátory
+        /analyze - Komplexná analýza trhu
+        /subscribe - Prihlásiť sa na notifikácie
+        /unsubscribe - Odhlásiť sa z notifikácií
+        /help - Zobrazí túto nápovedu
+        
+        Bot automaticky sleduje významné zmeny na trhu a pošle vám notifikáciu.
+        """
+        await update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN)
+
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Zobrazí nápovedu"""
+        await self.start(update, context)
+
+    async def subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Prihlási užívateľa na notifikácie"""
+        user_id = update.message.from_user.id
+        self.subscribed_users.add(user_id)
+        await update.message.reply_text("✅ Úspešne ste sa prihlásili na notifikácie o zmenách na trhu!")
+
+    async def unsubscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Odhlási užívateľa z notifikácií"""
+        user_id = update.message.from_user.id
+        self.subscribed_users.discard(user_id)
+        await update.message.reply_text("❌ Boli ste odhlásení z notifikácií o zmenách na trhu.")
+
+    async def prices(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Spracuje príkaz /prices"""
+        gold_price = await self.get_metal_price('XAU')
+        silver_price = await self.get_metal_price('XAG')
+        
+        if gold_price is None or silver_price is None:
+            await update.message.reply_text("⚠️ Momentálne nie je možné získať ceny. Skúste to prosím neskôr.")
+            return
+        
+        message = f"""
+        📊 Aktuálne ceny drahých kovov:
+
+        🥇 Zlato (XAUUSD): ${gold_price:.2f}
+        🥈 Striebro (XAGUSD): ${silver_price:.2f}
+        
+        Časová pečiatka: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        await update.message.reply_text(message)
+
+    async def news(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Spracuje príkaz /news"""
+        news = await self.get_market_news()
+        
+        if not news:
+            await update.message.reply_text("⚠️ Momentálne nie sú k dispozícii žiadne správy.")
+            return
+
+        message = "📰 Najnovšie správy z trhu:\n\n"
+        for item in news:
+            message += f"📌 {item['title']}\n"
+            sentiment_score = float(item['overall_sentiment_score'])
+            sentiment_emoji = "🟢" if sentiment_score > 0.2 else "🔴" if sentiment_score < -0.2 else "⚪"
+            message += f"   Sentiment: {sentiment_emoji} {sentiment_score:.2f}\n"
+            message += f"   {item['url']}\n\n"
+        
+        await update.message.reply_text(message)
+
+    async def indicators(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Spracuje príkaz /indicators"""
+        indicators = await self.get_economic_indicators()
+        
+        message = """
+        📈 Ekonomické indikátory:
+
+        Inflácia: {}%
+        Nezamestnanosť: {}%
+        NFP: {} tisíc
+        """.format(
+            indicators.get('inflation', 'N/A'),
+            indicators.get('unemployment', 'N/A'),
+            indicators.get('nfp', 'N/A')
+        )
+        
+        await update.message.reply_text(message)
+
+    async def analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Spracuje príkaz /analyze - komplexná analýza trhu"""
+        gold_price = await self.get_metal_price('XAU')
+        silver_price = await self.get_metal_price('XAG')
+        indicators = await self.get_economic_indicators()
+        news = await self.get_market_news()
+        
+        gold_silver_ratio = gold_price / silver_price if gold_price and silver_price else None
+        
+        analysis = f"""
+        🔍 Komplexná analýza trhu:
+
+        💰 Ceny drahých kovov:
+        🥇 Zlato: ${gold_price:.2f}
+        🥈 Striebro: ${silver_price:.2f}
+        📊 Pomer Zlato/Striebro: {gold_silver_ratio:.2f}
+
+        📈 Ekonomické indikátory:
+        📈 Inflácia: {indicators.get('inflation', 'N/A')}%
+        👥 Nezamestnanosť: {indicators.get('unemployment', 'N/A')}%
+        👨‍💼 NFP: {indicators.get('nfp', 'N/A')} tisíc
+
+        📰 Kľúčové správy a sentiment:
+        """
+        
+        for item in news[:3]:
+            sentiment_score = float(item['overall_sentiment_score'])
+            sentiment_emoji = "🟢" if sentiment_score > 0.2 else "🔴" if sentiment_score < -0.2 else "⚪"
+            analysis += f"\n• {item['title']}"
+            analysis += f"\n  Sentiment: {sentiment_emoji} {sentiment_score:.2f}"
+        
+        analysis += "\n\n💡 Odporúčania:"
+        if gold_silver_ratio:
+            if gold_silver_ratio > 80:
+                analysis += "\n• Vysoký pomer Zlato/Striebro naznačuje možné podhodnotenie striebra"
+            elif gold_silver_ratio < 60:
+                analysis += "\n• Nízky pomer Zlato/Striebro naznačuje možné podhodnotenie zlata"
+        
+        await update.message.reply_text(analysis)
+
+    async def check_market_changes(self, context: ContextTypes.DEFAULT_TYPE):
+        """Kontroluje významné zmeny na trhu a posiela notifikácie"""
+        gold_price = await self.get_metal_price('XAU')
+        silver_price = await self.get_metal_price('XAG')
+
+        if not gold_price or not silver_price:
+            logger.error("Nepodarilo sa získať ceny kovov pre kontrolu zmien")
+            return
+
+        # Kontrola zmien v cene zlata
+        if self.previous_gold_price and abs((gold_price - self.previous_gold_price) / self.previous_gold_price) > PRICE_CHANGE_THRESHOLD:
+            message = f"""
+            ⚠️ Významná zmena ceny zlata:
+            Nová cena: ${gold_price:.2f}
+            Zmena: {((gold_price - self.previous_gold_price) / self.previous_gold_price) * 100:.2f}%
+            """
+            for user_id in self.subscribed_users:
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=message)
+                except Exception as e:
+                    logger.error(f"Nepodarilo sa poslať notifikáciu užívateľovi {user_id}: {str(e)}")
+
+        # Kontrola zmien v cene striebra
+        if self.previous_silver_price and abs((silver_price - self.previous_silver_price) / self.previous_silver_price) > PRICE_CHANGE_THRESHOLD:
+            message = f"""
+            ⚠️ Významná zmena ceny striebra:
+            Nová cena: ${silver_price:.2f}
+            Zmena: {((silver_price - self.previous_silver_price) / self.previous_silver_price) * 100:.2f}%
+            """
+            for user_id in self.subscribed_users:
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=message)
+                except Exception as e:
+                    logger.error(f"Nepodarilo sa poslať notifikáciu užívateľovi {user_id}: {str(e)}")
+
+        self.previous_gold_price = gold_price
+        self.previous_silver_price = silver_price
+
+async def run_periodic_checks(application):
+    """Spúšťa periodické kontroly zmien na trhu"""
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        bot = MarketAnalysisBot()
+        await bot.check_market_changes(application)
+
+def main():
+    # Vytvorenie bota
+    bot = MarketAnalysisBot()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Pridanie handlerov pre príkazy
+    application.add_handler(CommandHandler("start", bot.start))
+    application.add_handler(CommandHandler("help", bot.help))
+    application.add_handler(CommandHandler("prices", bot.prices))
+    application.add_handler(CommandHandler("news", bot.news))
+    application.add_handler(CommandHandler("indicators", bot.indicators))
+    application.add_handler(CommandHandler("analyze", bot.analyze))
+    application.add_handler(CommandHandler("subscribe", bot.subscribe))
+    application.add_handler(CommandHandler("unsubscribe", bot.unsubscribe))
+
+    # Spustenie periodických kontrol v samostatnom vlákne
+    asyncio.create_task(run_periodic_checks(application))
+
+    # Spustenie bota
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
